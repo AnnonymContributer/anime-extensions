@@ -106,21 +106,36 @@ class Hanime :
 
     override fun searchAnimeParse(response: Response): AnimesPage = parseSearchJson(response)
 
+    override fun animeDetailsRequest(anime: SAnime): Request {
+        val slug = anime.url.substringAfterLast("/")
+        return GET("$baseUrl/api/v8/video?id=$slug")
+    }
+
     override fun animeDetailsParse(response: Response): SAnime {
-        val document = response.asJsoup()
+        val responseString = response.body.string().ifEmpty { 
+            return SAnime.create().apply { initialized = false }
+        }
+        val videoData = responseString.parseAs<VideoModel>()
+        val hentaiVideo = videoData.hentaiVideo ?: return SAnime.create().apply { initialized = false }
+        
         return SAnime.create().apply {
-            title = getTitle(document.select("h1.tv-title").text())
-            thumbnail_url = document.select("img.hvpi-cover").attr("src")
-            author = document.select("a.hvpimbc-text").text()
-            description = document.select("div.hvpist-description p").joinToString("\n\n") { it.text() }
+            title = getTitle(hentaiVideo.name ?: "")
+            thumbnail_url = hentaiVideo.coverUrl
+            author = hentaiVideo.brand
+            description = hentaiVideo.description?.replace(Regex("<[^>]*>"), "")
             status = SAnime.UNKNOWN
-            genre = document.select("div.hvpis-text div.btn__content").joinToString { it.text() }
+            genre = videoData.hentaiTags?.joinToString { it.text ?: "" } ?: ""
             initialized = true
-            setUrlWithoutDomain(document.location())
+            setUrlWithoutDomain("/videos/hentai/${hentaiVideo.slug}")
         }
     }
 
-    override fun videoListRequest(episode: SEpisode) = GET(episode.url)
+    override fun videoListRequest(episode: SEpisode): Request {
+        val headers = headers.newBuilder()
+            .add("Referer", baseUrl)
+            .build()
+        return GET(episode.url, headers = headers)
+    }
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
         setAuthCookie()
@@ -138,15 +153,17 @@ class Hanime :
         val parsed = document.selectFirst("script:containsData(__NUXT__)")!!.data()
             .substringAfter("__NUXT__=").substringBeforeLast(";").parseAs<WindowNuxt>()
 
+        val refererHeaders = Headers.headersOf("Referer", baseUrl)
         return parsed.state.data.video.videos_manifest.servers.flatMap { server ->
-            server.streams.map { stream -> Video(stream.url, stream.height + "p", stream.url) }
+            server.streams.map { stream -> Video(stream.url, stream.height + "p", stream.url, headers = refererHeaders) }
         }
     }
 
     override fun videoListParse(response: Response): List<Video> {
         val responseString = response.body.string().ifEmpty { return emptyList() }
+        val refererHeaders = Headers.headersOf("Referer", baseUrl)
         return responseString.parseAs<VideoModel>().videosManifest?.servers?.get(0)?.streams?.filter { it.kind != "premium_alert" }?.map {
-            Video(it.url, "${it.height}p", it.url)
+            Video(it.url, "${it.height}p", it.url, headers = refererHeaders)
         } ?: emptyList()
     }
 
@@ -170,9 +187,10 @@ class Hanime :
         return responseString.parseAs<VideoModel>().hentaiFranchiseHentaiVideos?.mapIndexed { idx, it ->
             SEpisode.create().apply {
                 episode_number = idx + 1f
-                name = "Episode ${idx + 1}"
+                name = it.name ?: "Episode ${idx + 1}"
                 date_upload = (it.releasedAtUnix ?: 0) * 1000
-                url = "$baseUrl/api/v8/video?id=${it.id}"
+                url = "$baseUrl/api/v8/video?id=${it.slug}"
+                scanlator = it.coverUrl  // Using scanlator field to store thumbnail URL
             }
         }?.reversed() ?: emptyList()
     }
